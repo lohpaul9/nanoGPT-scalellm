@@ -1,8 +1,8 @@
 TODO:
 --- BY TONIGHT ---
-1. Change up how you want to save the model
-2. Change up the inference script to be conditioned on CFG
-3. Set up metadata for the runs
+3. Saving between runs and models
+4. Do a grid search over the training size and the model parameters
+5. Benchmark timings
 
 The inputs:
 [context embedding, BOS token, tokens]

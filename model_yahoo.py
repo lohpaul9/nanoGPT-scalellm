@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from data.yahooreviewcuisine.prepare import get_batch_yahoo, CFGTokenizer, RestaurantCFG
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -259,18 +260,59 @@ class GPT(nn.Module):
         mfu = flops_achieved / flops_promised
         return mfu
 
+    # @torch.no_grad()
+    # def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    #     """
+    #     Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+    #     the sequence max_new_tokens times, feeding the predictions back into the model each time.
+    #     Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+    #     """
+    #     for _ in range(max_new_tokens):
+    #         # if the sequence context is growing too long we must crop it at block_size
+    #         idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+    #         # forward the model to get the logits for the index in the sequence
+    #         logits, _ = self(idx_cond)
+    #         # pluck the logits at the final step and scale by desired temperature
+    #         logits = logits[:, -1, :] / temperature
+    #         # optionally crop the logits to only the top k options
+    #         if top_k is not None:
+    #             v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+    #             logits[logits < v[:, [-1]]] = -float('Inf')
+    #         # apply softmax to convert logits to (normalized) probabilities
+    #         probs = F.softmax(logits, dim=-1)
+    #         # sample from the distribution
+    #         idx_next = torch.multinomial(probs, num_samples=1)
+    #         # append sampled index to the running sequence and continue
+    #         idx = torch.cat((idx, idx_next), dim=1)
+
+    #     return idx
+    
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate_cfg(self, context_embeddings, max_new_tokens, tokenizer : CFGTokenizer, temperature=1.0, top_k=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
+        # this is for a single batch of size 1
+        # context_embeddings is a tensor of shape (1, size_of_context_embedding)
+        # we start with a sequence of length 1 with the first token being the <BOS> token that gets 
+        # replaced by the context embedding
+        idx = torch.zeros((1, 1), dtype=torch.long, device=context_embeddings.device)
+        idx[0, 0] = tokenizer.get_token_id("<BOS>")
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            logits, _ = self(idx, context_embeddings)
+
+            # get the mask of the possible next tokens
+            list_of_tokens = idx.flatten().tolist()
+            mask = RestaurantCFG.get_possible_next_tokens_indexes_mask(list_of_tokens, tokenizer)
+            mask = mask.to(logits.device)
+
+            # we need to mask the logits where the mask is False
+            logits = logits.masked_fill(~mask, -float('Inf'))
+
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options
@@ -283,5 +325,8 @@ class GPT(nn.Module):
             idx_next = torch.multinomial(probs, num_samples=1)
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
+
+            if idx_next == tokenizer.get_token_id("<EOS>"):
+                break
 
         return idx
