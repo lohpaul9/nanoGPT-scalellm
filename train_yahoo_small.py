@@ -65,7 +65,7 @@ def train_yahoo_small(
     wandb_run_name = 'gpt' + '_' + experiment_name + '_run_' + str(time.time())
     # data
     gradient_accumulation_steps = 1 # used to simulate larger batch sizes
-    batch_size = 1024 # if gradient_accumulation_steps > 1, this is the micro-batch size
+    batch_size = max_train_sample if max_train_sample is not None else 1024 # if gradient_accumulation_steps > 1, this is the micro-batch size
     block_size = 8
     # model
     # n_layer = 1
@@ -220,12 +220,16 @@ def train_yahoo_small(
         for split in ['train', 'val']:
             losses = torch.zeros(eval_iters)
             for k in range(eval_iters):
-                X_EMBED, X_TOKENS, Y_TOKENS = get_batch_yahoo(batch_size, split=split, device=device, limit_to_num_samples=max_train_samples)
+                if split == 'train':
+                    X_EMBED, X_TOKENS, Y_TOKENS = get_batch_yahoo(batch_size, split=split, device=device, limit_to_num_samples=max_train_samples)
+                else:
+                    val_batch_size = 1024
+                    X_EMBED, X_TOKENS, Y_TOKENS = get_batch_yahoo(val_batch_size, split=split, device=device)
                 with ctx:
                     logits, loss = model(X_TOKENS, X_EMBED, Y_TOKENS)
 
                     if split == 'val':
-                        for i in range(batch_size):
+                        for i in range(val_batch_size):
                             cfg_tokens = model.generate_cfg(X_EMBED[i], max_new_tokens=block_size, tokenizer=tokenizer)
                             cfg_string = tokenizer.detokenize(cfg_tokens.flatten().tolist())
                             target_string = tokenizer.detokenize(Y_TOKENS[i].flatten().tolist())
@@ -419,29 +423,32 @@ def train_yahoo_small(
 
 if __name__ == "__main__":
 
-    n_layers = [1, 2]
-    n_heads = [1, 2, 4]
-    n_embd = [32, 64, 128, 256]
-    max_train_samples = [1024, 2000, 4000, 6000, None]
+    # n_layers = [1, 2]
+    # n_heads = [1, 2, 4]
+    # n_embeddings= [32, 64, 128, 256]
+    n_layers = [1]
+    n_heads = [2]
+    n_embeddings = [128]
+    max_train_samples = [128, 256, 512, 768, 1024, 2048, 4096, 8192, None]
     # max_iters = [100, 200, 500, 1000]
 
     total_experiments_run = 0
-    total_experiments = len(n_layers) * len(n_heads) * len(n_embd) * len(max_train_samples)
+    total_experiments = len(n_layers) * len(n_heads) * len(n_embeddings) * len(max_train_samples)
 
     # now store all the experiment info in a lookup table
     experiment_info_lookup = {}
 
     for n_layer in n_layers:
         for n_head in n_heads:
-            for n_embd in n_embd:
+            for n_embedding in n_embeddings:
                 for max_train_sample in max_train_samples:
-                    exp_name = f"yahoo_small_n_layer_{n_layer}_n_head_{n_head}_n_embd_{n_embd}_max_train_sample_{max_train_sample}"
+                    exp_name = f"yahoo_small_n_layer_{n_layer}_n_head_{n_head}_n_embedding_{n_embedding}_max_train_sample_{max_train_sample}"
                     experiment_info = train_yahoo_small(
                         experiment_name=exp_name,
                         block_size=8,
                         n_layer=n_layer,
                         n_head=n_head,
-                        n_embd=n_embd,
+                        n_embd=n_embedding,
                         dropout=0.0,
                         max_iters=500,
                         max_train_samples=max_train_sample,

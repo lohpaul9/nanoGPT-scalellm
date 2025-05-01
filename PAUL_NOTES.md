@@ -5,7 +5,13 @@ TODO:
 5. Benchmark timings
 
 The inputs:
-[context embedding, BOS token, tokens]
+[context embedding, tokens]
+
+
+New experiment:
+1. Generation script
+2. Dataloader script
+3. Training script
 
 The outputs:
 [tokens]

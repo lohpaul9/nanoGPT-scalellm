@@ -389,7 +389,7 @@ def get_batch_yahoo(batch_size, split="train", seed=None, device=None, limit_to_
         high = num_samples
     else:
         raise ValueError(f"Invalid split: {split}")
-    
+
     idx = rng.choice(high - low, size=batch_size, replace=False)
     idx += low
 
