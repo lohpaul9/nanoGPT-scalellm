@@ -29,6 +29,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model_yahoo import GPTConfig, GPT
+from data.yahooreviewcuisine.prepare import get_batch_yahoo, YelpEasyCFGTokenizer
+from data.yelp_multi_tags.prepare import YelpMultiTagsCFGTokenizer, get_batch_yelp_multi_tags
+
+
 
 
 # -----------------------------------------------------------------------------
@@ -45,6 +49,7 @@ def train_yahoo_small(
         dropout,
         max_iters,
         max_train_samples,
+        experiment_type,
         learning_rate = 6e-4,
         wandb_log = False,
         only_eval_at_end = True,
@@ -65,8 +70,9 @@ def train_yahoo_small(
     wandb_run_name = 'gpt' + '_' + experiment_name + '_run_' + str(time.time())
     # data
     gradient_accumulation_steps = 1 # used to simulate larger batch sizes
-    batch_size = max_train_sample if max_train_sample is not None else 1024 # if gradient_accumulation_steps > 1, this is the micro-batch size
-    block_size = 8
+    batch_size = max_train_samples if max_train_samples is not None else 4096 # if gradient_accumulation_steps > 1, this is the micro-batch size
+    if batch_size > 32768:
+        batch_size = 32768
     # model
     # n_layer = 1
     # n_head = 2
@@ -130,10 +136,27 @@ def train_yahoo_small(
     ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
     ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
+    if experiment_type == "easy":
+        tokenizer = YelpEasyCFGTokenizer()
+    elif experiment_type == "multi_tags":
+        tokenizer = YelpMultiTagsCFGTokenizer()
+    else:
+        raise ValueError(f"Invalid experiment type: {experiment_type}")
 
-    from data.yahooreviewcuisine.prepare import get_batch_yahoo, CFGTokenizer
+    if experiment_type == "easy":
+        get_batch_fn = get_batch_yahoo
+    elif experiment_type == "multi_tags":
+        get_batch_fn = get_batch_yelp_multi_tags
+    else:
+        raise ValueError(f"Invalid experiment type: {experiment_type}")
+    
 
-    tokenizer = CFGTokenizer()
+    if experiment_type == "easy":
+        block_size = 8
+    elif experiment_type == "multi_tags":
+        block_size = 32
+    else:
+        raise ValueError(f"Invalid experiment type: {experiment_type}")
 
     # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
     iter_num = 0
@@ -216,15 +239,18 @@ def train_yahoo_small(
         model.eval()
         total_correct = 0
         total_samples = 0
-        tokenizer = CFGTokenizer()
+        true_positives = 0
+        false_positives = 0
+        false_negatives = 0
         for split in ['train', 'val']:
             losses = torch.zeros(eval_iters)
             for k in range(eval_iters):
+                print(f"Evaluating {split} {k}/{eval_iters}")
                 if split == 'train':
-                    X_EMBED, X_TOKENS, Y_TOKENS = get_batch_yahoo(batch_size, split=split, device=device, limit_to_num_samples=max_train_samples)
+                    X_EMBED, X_TOKENS, Y_TOKENS = get_batch_fn(batch_size, split=split, device=device, limit_to_num_samples=max_train_samples)
                 else:
                     val_batch_size = 1024
-                    X_EMBED, X_TOKENS, Y_TOKENS = get_batch_yahoo(val_batch_size, split=split, device=device)
+                    X_EMBED, X_TOKENS, Y_TOKENS = get_batch_fn(val_batch_size, split=split, device=device)
                 with ctx:
                     logits, loss = model(X_TOKENS, X_EMBED, Y_TOKENS)
 
@@ -235,12 +261,39 @@ def train_yahoo_small(
                             target_string = tokenizer.detokenize(Y_TOKENS[i].flatten().tolist())
                             if target_string == cfg_string:
                                 total_correct += 1
+                            elif experiment_type == "multi_tags":
+                                expected_cuisine, expected_food_tags, expected_non_food_tags = tokenizer.deconstruct_to_properties(Y_TOKENS[i].flatten().tolist())
+                                predicted_cuisine, predicted_food_tags, predicted_non_food_tags = tokenizer.deconstruct_to_properties(cfg_tokens.flatten().tolist())
+
+                                # update precision, recall, and F1 score
+                                all_expected_tags = expected_food_tags + expected_non_food_tags
+                                if expected_cuisine is not None:
+                                    all_expected_tags.append(expected_cuisine)
+                                all_predicted_tags = predicted_food_tags + predicted_non_food_tags
+                                if predicted_cuisine is not None:
+                                    all_predicted_tags.append(predicted_cuisine)
+
+
+
+                                for tag in all_expected_tags:
+                                    if tag in all_predicted_tags:
+                                        true_positives += 1
+                                    else:
+                                        false_negatives += 1
+                                for tag in all_predicted_tags:
+                                    if tag not in all_expected_tags:
+                                        false_positives += 1
                             total_samples += 1
 
                 losses[k] = loss.item()
             
             if split == 'val':
                 out[f"val_accuracy"] = total_correct / total_samples
+                if experiment_type == "multi_tags":
+                    print(f"True positives: {true_positives}, False positives: {false_positives}, False negatives: {false_negatives}")
+                    out[f"val_precision"] = true_positives / (true_positives + false_positives)
+                    out[f"val_recall"] = true_positives / (true_positives + false_negatives)
+                    out[f"val_f1"] = 2 * (out[f"val_precision"] * out[f"val_recall"]) / (out[f"val_precision"] + out[f"val_recall"])
             out[split] = losses.mean()
         model.train()
         return out
@@ -265,7 +318,7 @@ def train_yahoo_small(
         wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
     # training loop
-    X_EMBED, X_TOKENS, Y_TOKENS = get_batch_yahoo(batch_size, split="train", device=device, limit_to_num_samples=max_train_samples) # fetch the very first batch
+    X_EMBED, X_TOKENS, Y_TOKENS = get_batch_fn(batch_size, split="train", device=device, limit_to_num_samples=max_train_samples) # fetch the very first batch
     t0 = time.time()
     t_start_train = time.time()
     local_iter_num = 0 # number of iterations in the lifetime of this process
@@ -323,7 +376,7 @@ def train_yahoo_small(
                 logits, loss = model(X_TOKENS, X_EMBED, Y_TOKENS)
                 loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
-            X_EMBED, X_TOKENS, Y_TOKENS = get_batch_yahoo(batch_size, split="train", device=device, limit_to_num_samples=max_train_samples)
+            X_EMBED, X_TOKENS, Y_TOKENS = get_batch_fn(batch_size, split="train", device=device, limit_to_num_samples=max_train_samples)
             # backward pass, with gradient scaling if training in fp16
             scaler.scale(loss).backward()
         # clip the gradient
@@ -400,8 +453,13 @@ def train_yahoo_small(
         'num_eval_samples': num_eval_samples,
         'training_time': t_end_train - t_start_train,
         'eval_time': t_end_eval - t_start_eval,
-        'model_size': model_size,
+        'model_size': model_size
     }
+
+    if experiment_type == "multi_tags":
+        experiment_info['val_precision'] = losses['val_precision']
+        experiment_info['val_recall'] = losses['val_recall']
+        experiment_info['val_f1'] = losses['val_f1']
 
     experiment_info = {**model_args, **experiment_info}
 
@@ -420,17 +478,16 @@ def train_yahoo_small(
 
     
 
-
-if __name__ == "__main__":
+def run_experiment():
 
     # n_layers = [1, 2]
     # n_heads = [1, 2, 4]
     # n_embeddings= [32, 64, 128, 256]
     n_layers = [1]
-    n_heads = [2]
-    n_embeddings = [128]
-    max_train_samples = [128, 256, 512, 768, 1024, 2048, 4096, 8192, None]
-    # max_iters = [100, 200, 500, 1000]
+    n_heads = [4]
+    n_embeddings = [512]
+    max_train_samples = [1024, 2048, 4096, 8192, 16384, 32768, 65536, None]
+    max_iters = [100, 200, 500, 1000, 2000]
 
     total_experiments_run = 0
     total_experiments = len(n_layers) * len(n_heads) * len(n_embeddings) * len(max_train_samples)
@@ -442,37 +499,45 @@ if __name__ == "__main__":
         for n_head in n_heads:
             for n_embedding in n_embeddings:
                 for max_train_sample in max_train_samples:
-                    exp_name = f"yahoo_small_n_layer_{n_layer}_n_head_{n_head}_n_embedding_{n_embedding}_max_train_sample_{max_train_sample}"
-                    experiment_info = train_yahoo_small(
-                        experiment_name=exp_name,
-                        block_size=8,
-                        n_layer=n_layer,
-                        n_head=n_head,
-                        n_embd=n_embedding,
-                        dropout=0.0,
-                        max_iters=500,
-                        max_train_samples=max_train_sample,
-                        wandb_log=False,
-                        only_eval_at_end=True,
-                    )
-                    total_experiments_run += 1
-                    print(f"Total experiments run: {total_experiments_run}/{total_experiments}")
-                    
-                    experiment_info_lookup[exp_name] = experiment_info
+                    for max_iter in max_iters:
+                        exp_name = f"yahoo_small_n_layer_{n_layer}_n_head_{n_head}_n_embedding_{n_embedding}_max_train_sample_{max_train_sample}_max_iters_{max_iter}"
+                        experiment_info = train_yahoo_small(
+                            experiment_name=exp_name,
+                            block_size=32,
+                            n_layer=n_layer,
+                            n_head=n_head,
+                            n_embd=n_embedding,
+                            dropout=0.0,
+                            max_iters=max_iter,
+                            experiment_type="multi_tags",
+                            max_train_samples=max_train_sample,
+                            wandb_log=False,
+                            only_eval_at_end=True,
+                        )
+                        total_experiments_run += 1
+                        print(f"Total experiments run: {total_experiments_run}/{total_experiments}")
+                        
+                        experiment_info_lookup[exp_name] = experiment_info
 
     # save the experiment info lookup table to a JSON file
-    with open('experiment_info_lookup.json', 'w') as f:
+    with open('experiments/multi_tags/multi_tags_experiment_info_lookup.json', 'w') as f:
         json.dump(experiment_info_lookup, f)
+
+if __name__ == "__main__":
+    run_experiment()
+
+
 
     # train_yahoo_small(
     #     experiment_name="yahoo_small",
-    #     block_size=8,
+    #     block_size=32,
     #     n_layer=1,
-    #     n_head=2,
-    #     n_embd=128,
+    #     n_head=4,
+    #     n_embd=512,
     #     dropout=0.0,
     #     max_iters=500,
-    #     max_train_samples=4000,
+    #     max_train_samples=8192,
+    #     experiment_type="multi_tags",
     #     wandb_log=False,
     #     only_eval_at_end=True,
     # )

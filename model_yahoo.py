@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from data.yahooreviewcuisine.prepare import get_batch_yahoo, CFGTokenizer, RestaurantCFG
+from data.yahooreviewcuisine.prepare import YelpEasyCFGTokenizer
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -288,7 +288,7 @@ class GPT(nn.Module):
     #     return idx
     
     @torch.no_grad()
-    def generate_cfg(self, context_embeddings, max_new_tokens, tokenizer : CFGTokenizer, temperature=1.0, top_k=None):
+    def generate_cfg(self, context_embeddings, max_new_tokens, tokenizer, temperature=1.0, top_k=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
@@ -307,7 +307,7 @@ class GPT(nn.Module):
 
             # get the mask of the possible next tokens
             list_of_tokens = idx.flatten().tolist()
-            mask = RestaurantCFG.get_possible_next_tokens_indexes_mask(list_of_tokens, tokenizer)
+            mask = tokenizer.get_possible_next_tokens_indexes_mask(list_of_tokens)
             mask = mask.to(logits.device)
 
             # we need to mask the logits where the mask is False
