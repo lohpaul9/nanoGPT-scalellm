@@ -395,17 +395,20 @@ def get_gpt_completions_multitags():
         print(f"Recall: {f1_metrics[2]}")
 
 
-def get_hf_prompt_completion_dataset(max_train_samples, path_to_json_file, task):
+def get_hf_prompt_completion_dataset(max_train_samples, path_to_json_file, task, is_training=True):
     if task == "multi_tags":
         prompt_prefix = prompt_prefix_multi_tags
-    elif task == "easy_classifier":
+    elif task == "easy":
         prompt_prefix = prompt_prefix_easy_classifier
     else:
         raise ValueError(f"Task {task} not supported")
 
     # Path to your JSON file
     data = json.load(open(path_to_json_file, "r"))
-    data = data[:max_train_samples]
+    if is_training:
+        data = data[:max_train_samples]
+    else:
+        data = data[max_train_samples:]
 
     
 
@@ -413,7 +416,8 @@ def get_hf_prompt_completion_dataset(max_train_samples, path_to_json_file, task)
     def format_prompt_completion(example):
         return {
             "prompt": prompt_prefix + example["input"],
-            "completion": example["generated"],  # or use "expected" if preferred
+            "completion": example["generated"],  # or use "expected" if preferred,
+            "expected": example["expected"]
         }
 
     # Apply formatting
@@ -425,6 +429,8 @@ def get_hf_prompt_completion_dataset(max_train_samples, path_to_json_file, task)
     return dataset
 
 
+def get_hf_prompt_only_dataset_from_full_prompt_completion_dataset(dataset : Dataset):
+    return dataset.map(lambda x: x["prompt"])
 
 
 if __name__ == "__main__":
