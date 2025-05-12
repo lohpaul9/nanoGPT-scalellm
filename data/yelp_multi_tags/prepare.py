@@ -1,10 +1,15 @@
 import json
-from typing import List
+from typing import List, Optional
 import psycopg2
 import random
 import re
 import torch
 import time
+import numpy as np
+import os
+import pickle
+from datasets import load_dataset, Dataset
+
 # Define the cuisines from the queries.py file
 """
  Restaurants                          | 52268
@@ -59,7 +64,6 @@ FOOD_RELATED_TAGS = [
     "Specialty Food",
     "Seafood",
     "Desserts",
-    "Chinese",
     "Bakeries",
     "Salad",
     "Chicken Wings"
@@ -84,7 +88,6 @@ NON_FOOD_RELATED_TAGS = [
     "Home & Garden",
     "Fashion",
     "Arts & Entertainment",
-    "Auto Repair",
     "Hair Salons",
     "Nail Salons",
     "Doctors",
@@ -244,21 +247,90 @@ class YelpMultiTagsCFGTokenizer:
         # we know tha the string is well-formed, so we can look ahead to see if the next token is a valid token
 
         while text:
+            found_token = False
             for token in self.all_tokens:
                 if text.startswith(token):
                     tokens.append(self.tokens_to_id[token])
                     text = text[len(token):]
+                    found_token = True
                     break
+            if not found_token:
+                raise ValueError(f"Invalid token:{text}")
 
         tokens.append(self.tokens_to_id["<EOS>"])
 
         return tokens
-    
 
     @classmethod
-    def detokenize(self, tokens: List[int]) -> str:
+    def deconstruct_to_properties(cls, tokens: List[int]):
+        cuisine = None
+        food_tags = []
+        non_food_tags = []
+
+        # change pad to 0 
+        tokens = [0 if token == -1 else token for token in tokens]
+
+        stringified_tokens = [cls.all_tokens[token] for token in tokens]
+
+        for token in stringified_tokens:
+            if token in cls.cuisine_tokens:
+                cuisine = token
+            elif token in cls.food_tag_tokens:
+                food_tags.append(token)
+            elif token in cls.non_food_tag_tokens:
+                non_food_tags.append(token)
+        
+        return cuisine, food_tags, non_food_tags
+
+
+    @classmethod
+    def get_f1_sub_metrics(cls, expected: List[int], predicted: List[int]):
+        true_positives = 0
+        false_positives = 0
+        false_negatives = 0
+
+        expected_cuisine, expected_food_tags, expected_non_food_tags = cls.deconstruct_to_properties(expected)
+        predicted_cuisine, predicted_food_tags, predicted_non_food_tags = cls.deconstruct_to_properties(predicted)
+
+        # update precision, recall, and F1 score
+        all_expected_tags = expected_food_tags + expected_non_food_tags
+        if expected_cuisine is not None:
+            all_expected_tags.append(expected_cuisine)
+        all_predicted_tags = predicted_food_tags + predicted_non_food_tags
+        if predicted_cuisine is not None:
+            all_predicted_tags.append(predicted_cuisine)
+
+        for tag in all_expected_tags:
+            if tag in all_predicted_tags:
+                true_positives += 1
+            else:
+                false_negatives += 1
+        for tag in all_predicted_tags:
+            if tag not in all_expected_tags:
+                false_positives += 1
+        
+        return true_positives, false_positives, false_negatives
+    
+    @classmethod
+    def get_f1_score(cls, true_positives: int, false_positives: int, false_negatives: int) -> float:
+        precision = true_positives / (true_positives + false_positives)
+        recall = true_positives / (true_positives + false_negatives)
+        f1_score = 2 * (precision * recall) / (precision + recall)
+
+        return f1_score, precision, recall
+
+    @classmethod
+    def detokenize(self, tokens: List[int], require_eos: bool = True) -> str:
         # cutoff at first <EOS>
-        eos_index = self.tokens_to_id["<EOS>"]
+        eos_id = self.tokens_to_id["<EOS>"]
+        if eos_id not in tokens:
+            if require_eos:
+                raise ValueError(f"No <EOS> found in tokens: {tokens}")
+            else:
+                eos_index = len(tokens)
+        else:
+            eos_index = tokens.index(eos_id)
+
         tokens = tokens[:eos_index]
 
         ignore_tokens = [-1, self.tokens_to_id["<PAD>"], self.tokens_to_id["<BOS>"]]
@@ -288,6 +360,8 @@ class YelpMultiTagsCFGTokenizer:
             valid_tokens = ["{"]
         elif last_token == "RESTAURANT":
             valid_tokens = ["("]
+        elif last_token == "(":
+            valid_tokens = cls.cuisine_tokens
         elif last_token == ")":
             valid_tokens = ["}", ","] + cls.food_tag_tokens
         elif last_token in cls.cuisine_tokens:
@@ -300,19 +374,19 @@ class YelpMultiTagsCFGTokenizer:
             else:
                 raise ValueError(f"Invalid tokens: {list_of_tokens}")
         elif last_token == "}":
-            if food_tags_token_id in list_of_tokens and non_food_tags_token_id in list_of_tokens:
+            if non_food_tags_token_id in list_of_tokens:
                 valid_tokens = ["<EOS>"]
             elif food_tags_token_id in list_of_tokens:
                 valid_tokens = ["NON_FOOD_TAGS", "<EOS>"]
             else:
                 raise ValueError(f"Invalid tokens: {list_of_tokens}")
         elif last_token == ",":
-            # case 1: food
-            if food_tags_token_id in list_of_tokens:
-                valid_tokens = ["}"] + cls.food_tag_tokens
             # case 2: non-food
-            elif non_food_tags_token_id in list_of_tokens:
+            if non_food_tags_token_id in list_of_tokens:
                 valid_tokens = ["}"] + cls.non_food_tag_tokens
+            # case 1: food
+            elif food_tags_token_id in list_of_tokens:
+                valid_tokens = ["}"] + cls.food_tag_tokens
             else:
                 raise ValueError(f"Invalid tokens: {list_of_tokens}")
         elif last_token in cls.food_tag_tokens:
@@ -320,14 +394,14 @@ class YelpMultiTagsCFGTokenizer:
         elif last_token in cls.non_food_tag_tokens:
             valid_tokens = ["}", ","]
         elif last_token == "<EOS>":
-            valid_tokens = []
+            valid_tokens = ["<EOS>"]
         else:
-            raise ValueError(f"Invalid tokens: {cls.detokenize(list_of_tokens)}")
+            raise ValueError(f"Invalid tokens: {cls.detokenize(list_of_tokens)}, {list_of_tokens}")
 
         return [cls.tokens_to_id[token] for token in valid_tokens]
     
     @classmethod
-    def get_possible_next_tokens_mask(cls, list_of_tokens: List[int]) -> torch.Tensor:
+    def get_possible_next_tokens_indexes_mask(cls, list_of_tokens: List[int]) -> torch.Tensor:
         possible_next_tokens_indexes = cls.get_possible_next_tokens_indexes(list_of_tokens)
         next_tokens_indexes_torch = torch.tensor(possible_next_tokens_indexes, dtype=torch.long)
         mask = torch.zeros(len(cls.all_tokens), dtype=torch.bool)
@@ -345,10 +419,171 @@ class YelpMultiTagsCFGTokenizer:
             if next_token not in next_possible_tokens:
                 print(f"Invalid token: {next_token}")
                 print(f"Possible tokens: {next_possible_tokens}")
+                print(f"Current tokens: {tokenized_cfg_string[:i]}")
+                print(f"current string {cls.detokenize(tokenized_cfg_string[:i])}")
                 return False
             
         return True    
 
+    @classmethod
+    def get_vocab_size(cls) -> int:
+        return len(cls.all_tokens)
+    
+    @classmethod
+    def get_token_id(cls, token: str) -> int:
+        return cls.tokens_to_id[token]
+
+block_size = 48
+from data.yahooreviewcuisine.prepare import stella_400m
+output_dir = "data/yelp_multi_tags_2"
+
+def prepare_data(outputs_only: bool = False):
+    # 1. Load reviews.json
+    with open(os.path.join(output_dir, "with_generations_2.json"), "r") as f:
+        data = json.load(f)
+
+    inputs = [item["input"] for item in data]
+    outputs = [item["expected"] for item in data]
+    generation_outputs = [item["generated"] for item in data]
+
+    if not outputs_only:
+        # 2. Embed inputs
+        time_start = time.time()
+        stella = stella_400m()  # Replace with your actual Stella model
+        input_embeddings = stella.embed(inputs)
+        time_end = time.time()
+        print(f"Time taken to embed inputs: {time_end - time_start} seconds")
+
+    max_token_length = -1
+
+    # 3. Tokenize and pad outputs
+    tokenizer = YelpMultiTagsCFGTokenizer()
+    output_tokens = []
+    generated_tokens_list = []
+    for i in range(len(outputs)):
+        tokens = tokenizer.tokenize(outputs[i])
+        max_token_length = max(max_token_length, len(tokens))
+        # Pad or truncate to block_size
+        if len(tokens) < block_size:
+            tokens += [tokenizer.tokens_to_id["<PAD>"]] * (block_size - len(tokens))
+        elif len(tokens) > block_size:
+            raise ValueError(f"Output token length is greater than block size: {len(tokens)} > {block_size}")
+        
+        generated_tokens = tokenizer.tokenize(generation_outputs[i])
+        if len(generated_tokens) < block_size:
+            generated_tokens += [tokenizer.tokens_to_id["<PAD>"]] * (block_size - len(generated_tokens))
+        elif len(generated_tokens) > block_size:
+            raise ValueError(f"Generated token length is greater than block size: {len(generated_tokens)} > {block_size}")
+
+        output_tokens.append(tokens)
+        generated_tokens_list.append(generated_tokens)
+
+    output_tokens = np.array(output_tokens, dtype=np.int16)  # shape: (num_samples, block_size)
+    generated_tokens_list = np.array(generated_tokens_list, dtype=np.int16)  # shape: (num_samples, block_size)
+    print(f"Max token length: {max_token_length}")
+
+    # check that all the lists are the same length
+    assert len(output_tokens) == len(generated_tokens_list)
+    if not outputs_only:
+        assert len(input_embeddings) == len(output_tokens) == len(generated_tokens_list)
+
+
+
+    # 4. Save to files
+    if not outputs_only:
+        np.save(os.path.join(output_dir, "input_embeddings_2.npy"), input_embeddings)
+    np.save(os.path.join(output_dir, "output_tokens_2.npy"), output_tokens)
+    np.save(os.path.join(output_dir, "generated_tokens_list_2.npy"), generated_tokens_list)
+
+    # Save tokenizer metadata for reference
+    with open(os.path.join(output_dir, "tokenizer_meta.pkl"), "wb") as f:
+        pickle.dump({
+            "vocab_size": tokenizer.get_vocab_size(),
+            "pad_token_id": tokenizer.tokens_to_id["<PAD>"],
+            "eos_token_id": tokenizer.tokens_to_id["<EOS>"],
+        }, f)
+
+    print(f"Saved {len(inputs)} samples to {output_dir}")
+
+
+in_memory_input_embeddings_multi_tags = None
+in_memory_output_tokens_multi_tags = None
+in_memory_generated_tokens_list_multi_tags = None
+rng = np.random.default_rng(2)
+
+
+def get_batch_yelp_multi_tags(batch_size: int,  train_samples_limit, split: str = "train", device: Optional[torch.device] = None):
+    global in_memory_input_embeddings_multi_tags, in_memory_output_tokens_multi_tags, in_memory_generated_tokens_list_multi_tags
+
+    if in_memory_input_embeddings_multi_tags is None:
+        in_memory_input_embeddings_multi_tags = np.load(os.path.join(output_dir, "input_embeddings_2.npy"))
+        print(f"Loaded input embeddings for {in_memory_input_embeddings_multi_tags.shape[0]} samples")
+    if in_memory_output_tokens_multi_tags is None:
+        in_memory_output_tokens_multi_tags = np.load(os.path.join(output_dir, "output_tokens_2.npy")) 
+        print(f"Loaded output tokens for {in_memory_output_tokens_multi_tags.shape[0]} samples")
+    if in_memory_generated_tokens_list_multi_tags is None:
+        in_memory_generated_tokens_list_multi_tags = np.load(os.path.join(output_dir, "generated_tokens_list_2.npy"))
+        print(f"Loaded generated tokens list for {in_memory_generated_tokens_list_multi_tags.shape[0]} samples")
+    
+
+    num_samples = in_memory_input_embeddings_multi_tags.shape[0]
+
+    assert not (train_samples_limit is None and split == "train")
+    # batch size is only valid for training split (batches are done outside of this for val)
+    assert (batch_size is not None and split == "train") or (batch_size is None and split != "train")
+
+    if split == "train":
+        low = 0
+        high = train_samples_limit
+    elif split == "val" or split == "test":
+        low = train_samples_limit
+        high = num_samples
+    else:
+        raise ValueError(f"Invalid split: {split}")
+    
+    possible_choice_num = high - low
+    if batch_size is not None and batch_size > possible_choice_num:
+        raise ValueError(f"Possible choice number is smaller than batch size: {possible_choice_num} < {batch_size}")
+    
+    if split == "train":
+        idx = rng.choice(possible_choice_num, size=batch_size, replace=False)
+        idx += low
+    else:   
+        idx = np.arange(low, high)
+
+    x_embed = in_memory_input_embeddings_multi_tags[idx]  # (batch_size, embedding_dim)
+    if split == "train":
+        tokens = in_memory_generated_tokens_list_multi_tags[idx]      # (batch_size, block_size)
+    elif split == "val":
+        tokens = in_memory_generated_tokens_list_multi_tags[idx]      # (batch_size, block_size)
+    elif split == "test":
+        tokens = in_memory_output_tokens_multi_tags[idx]      # (batch_size, block_size)
+
+    # convert all to torch tensors 
+    x_embed = torch.from_numpy(x_embed)
+    # convert to int64
+    tokens = tokens.astype(np.int64)
+    tokens = torch.from_numpy(tokens)
+
+    # For next-token prediction: x = tokens[:-1] and end padded with <PAD>
+    x_tokens = tokens
+    y_tokens = tokens[:, 1:]
+    # pad with <PAD> (-1) to the right
+
+    y_tokens_size = y_tokens.shape[0]
+    y_tokens = torch.cat([y_tokens, -1 * torch.ones(y_tokens_size, 1, dtype=torch.int64)], dim=1)
+
+    # put on device
+    # x_embed = x_embed.to(device)
+    # x_tokens = x_tokens.to(device)
+    # y_tokens = y_tokens.to(device)
+
+    return x_embed, x_tokens, y_tokens
+    
+
+
+
+    
 
 
 def main():
@@ -360,8 +595,10 @@ def main():
     for example in examples:
         tokenized_example = YelpMultiTagsCFGTokenizer.tokenize(example["output"])
         detokenized_example = YelpMultiTagsCFGTokenizer.detokenize(tokenized_example)
+        assert detokenized_example == example["output"]
         if not YelpMultiTagsCFGTokenizer.verify_cfg_string(detokenized_example):
-            print(f"Invalid example: {example}")
+            print(f"Invalid example: {example['output']}")
+            break
     t_end = time.time()
     print(f"Time taken: {t_end - t_start} seconds")
 
@@ -370,7 +607,34 @@ def main():
     # Save examples
     save_examples(examples, "data/yelp_multi_tags/multi_tags_yelp.json")
 
+    # prepare_data()
+
+    # example = [4, 9, 21, 8, 16, 10, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+    # print(YelpMultiTagsCFGTokenizer.detokenize(example))
+
+
+
 
 if __name__ == "__main__":
-    main() 
+    # main() 
+    # open the json file, and check how many generations are none
+    with open("data/yelp_multi_tags/with_generations_2.json", "r") as f:
+        data = json.load(f)
 
+    print(f"Total examples: {len(data)}")
+
+    # compare the top 20 generaitons and expected
+    for i in range(20):
+        print(f"Example {i}:")
+        print(f"Expected: {data[i]['expected']}")
+        print(f"Generated: {data[i]['generated']}")
+        print()
+
+    none_count = 0
+    for item in data:
+        if item["generated"] is None:
+            none_count += 1
+
+    print(f"None count: {none_count}")
+
+    prepare_data()

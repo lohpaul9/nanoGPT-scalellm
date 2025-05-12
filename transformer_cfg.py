@@ -28,77 +28,7 @@ def easy_example_cfg_str():
 
     return cfg_str
 
-class EasyPydanticModel(BaseModel):
-    restaurant: bool
-    cuisine: Optional[CuisineEnum]
 
-    @field_validator('cuisine', mode='after')
-    @classmethod
-    def remove_stopwords(cls, v: str, info: ValidationInfo) -> str:
-        if info.data["restaurant"]:
-            return v
-        else:
-            raise ValueError("Cuisine is not allowed for non-restaurant")
-        
-    def __str__(self):
-        if self.restaurant:
-            return  "{" + f"restaurant({self.cuisine})" + "}"
-        else:
-            return "{" + "not_restaurant" + "}"
-        
-
-
-
-    
-
-
-
-def get_instructions_and_expected(file_path, prompt_prefix, eval_size=1):
-    with open(file_path, "r") as f:
-        data = json.load(f)
-
-    data = data[:eval_size]
-
-    input_list = [item["input"] for item in data]
-    instructions = [f"{prompt_prefix} {item}" for item in input_list]
-    expected = [item["output"] for item in data]
-    return instructions, expected
-
-
-def get_chatgpt_completions():
-
-    prompt_prefix = """Classify the following business reviews as a restaurant with its cuisine or not a restaurant. Example:
-    Input: The pasta was great!
-    Output: {Restaurant(italian)}
-
-    Input: I was filling up gas at the gas station.
-    Output: {Not Restaurant}
-
-    Input: I liked the burrito.
-    Output: {Restaurant(mexican)}
-    """
-
-    instructions, expected = get_instructions_and_expected("data/yahooreviewcuisine/all_reviews.json", prompt_prefix, eval_size=256)
-
-    client = OpenAI()
-    completions = client.beta.chat.completions.parse(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": instruction} for instruction in instructions],
-        temperature=0.0,
-        response_format=EasyPydanticModel,
-    )
-
-    predicted_answers = [completion.choices[0].message.content for completion in completions]
-
-    string_predicted_answers = [str(predicted_answer) for predicted_answer in predicted_answers]
-
-    correct = 0
-    for predicted_answer, expected_answer in zip(string_predicted_answers, expected):
-        if predicted_answer == expected_answer:
-            correct += 1
-
-    accuracy = correct / len(string_predicted_answers)
-    return accuracy
 
 
 def run_experiment(grammar_str, model_id, device, file_path, prompt_prefix, eval_metric="accuracy", eval_size=256, max_new_tokens=12, batch_size=64):

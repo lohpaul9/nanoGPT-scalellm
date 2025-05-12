@@ -4,12 +4,17 @@ import numpy as np
 import pickle
 from sentence_transformers import SentenceTransformer
 import torch
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, field_validator, ValidationInfo, Field
 from typing import Literal, Optional
+from enum import Enum
+from openai import OpenAI
+from pprint import pprint
+import time
+
 
 class stella_400m:
     def __init__(self):
-        self.batch_size = 65536
+        self.batch_size = 1024
         self.model = SentenceTransformer(
             "dunzhang/stella_en_400M_v5",
             trust_remote_code=True,
@@ -54,58 +59,68 @@ os.makedirs(output_dir, exist_ok=True)
 from typing import List, Dict, Optional
 import re
 
-class CFGTokenizer:
+
+# Define a list of cuisines for the restaurant model
+CUISINES = [
+    "japanese", "chinese", "indian", "american", "italian", 
+    "french", "mexican"
+]
+
+
+
+
+class YelpEasyCFGTokenizer:
     """
     A simple tokenizer for the CFG vocabulary.
     """
-    def __init__(self):
-        # Special tokens
-        self.special_tokens = {
-            "<PAD>": -1,
-            "<EOS>": 1,
-            "<BOS>": 2
-        }
-        
-        # CFG tokens
-        self.cfg_tokens = {
-            "{": 3,
-            "}": 4,
-            "(": 5,
-            ")": 6,
-            "restaurant": 7,
-            "not_restaurant": 8
-        }
-        
-        # Cuisine tokens
-        self.cuisine_tokens = {
-            "japanese": 9,
-            "chinese": 10,
-            "indian": 11,
-            "american": 12,
-            "italian": 13,
-            "french": 14,
-            "mexican": 15
-        }
-        
-        # Combine all tokens
-        self.vocab = {**self.special_tokens, **self.cfg_tokens, **self.cuisine_tokens}
-        self.reverse_vocab = {v: k for k, v in self.vocab.items()}
-
-        print(self.reverse_vocab)
-        
-        # Vocabulary size
-        self.vocab_size = len(self.vocab)
-        
-        # Special token IDs
-        self.pad_token_id = self.special_tokens["<PAD>"]
-        self.eos_token_id = self.special_tokens["<EOS>"]
+    # Special tokens
+    special_tokens = {
+        "<PAD>": -1,
+        "<EOS>": 1,
+        "<BOS>": 2
+    }
     
-    def tokenize(self, text: str) -> List[int]:
+    # CFG tokens
+    cfg_tokens = {
+        "{": 3,
+        "}": 4,
+        "(": 5,
+        ")": 6,
+        "restaurant": 7,
+        "not_restaurant": 8
+    }
+    
+    # Cuisine tokens
+    cuisine_tokens = {
+        "japanese": 9,
+        "chinese": 10,
+        "indian": 11,
+        "american": 12,
+        "italian": 13,
+        "french": 14,
+        "mexican": 15
+    }
+    
+    # Combine all tokens
+    vocab = {**special_tokens, **cfg_tokens, **cuisine_tokens}
+    reverse_vocab = {v: k for k, v in vocab.items()}
+
+    print(reverse_vocab)
+    
+    # Vocabulary size
+    vocab_size = len(vocab)
+    
+    # Special token IDs
+    pad_token_id = special_tokens["<PAD>"]
+    eos_token_id = special_tokens["<EOS>"]
+    
+    @classmethod
+    def tokenize(cls, text: str) -> List[int]:
         """
         Tokenize a CFG string into token IDs.
         """
         # Add BOS token
-        tokens = [self.special_tokens["<BOS>"]]
+        tokens = [cls.special_tokens["<BOS>"]]
         
         # Simple regex-based tokenization
         # This is a very simple approach that works for our specific CFG format
@@ -117,29 +132,30 @@ class CFGTokenizer:
             token = next(t for t in match if t)
             
             # Check if it's a cuisine
-            if token in self.cuisine_tokens:
-                tokens.append(self.cuisine_tokens[token])
+            if token in cls.cuisine_tokens:
+                tokens.append(cls.cuisine_tokens[token])
             # Check if it's a CFG token
-            elif token in self.cfg_tokens:
-                tokens.append(self.cfg_tokens[token])
+            elif token in cls.cfg_tokens:
+                tokens.append(cls.cfg_tokens[token])
             # Unknown token
             else:
                 print(f"Unknown token: {token}")
                 raise ValueError(f"Unknown token: {token}")
         
         # Add EOS token
-        tokens.append(self.eos_token_id)
+        tokens.append(cls.eos_token_id)
         
         return tokens
     
-    def detokenize(self, token_ids: List[int]) -> str:
+    @classmethod
+    def detokenize(cls, token_ids: List[int]) -> str:
         """
         Convert token IDs back to a CFG string.
         """
         tokens = []
         for token_id in token_ids:
-            if token_id in self.reverse_vocab:
-                token = self.reverse_vocab[token_id]
+            if token_id in cls.reverse_vocab:
+                token = cls.reverse_vocab[token_id]
                 # Skip special tokens
                 if token not in ["<PAD>", "<EOS>", "<BOS>"]:
                     tokens.append(token)
@@ -165,72 +181,35 @@ class CFGTokenizer:
         
         return result
     
-    def get_token_id(self, token: str) -> int:
+    @classmethod
+    def get_token_id(cls, token: str) -> int:
         """
         Get the token ID for a token.
         """
-        if token in self.vocab:
-            return self.vocab[token]
+        if token in cls.vocab:
+            return cls.vocab[token]
         else:
             print(f"Unknown token: {token}")
             raise ValueError(f"Unknown token: {token}")
     
-    def get_token(self, token_id: int) -> str:
+    @classmethod
+    def get_token(cls, token_id: int) -> str:
         """
         Get the token for a token ID.
         """
-        if token_id in self.reverse_vocab:
-            return self.reverse_vocab[token_id]
+        if token_id in cls.reverse_vocab:
+            return cls.reverse_vocab[token_id]
         else:
             print(f"Unknown token ID: {token_id}")
             raise ValueError(f"Unknown token ID: {token_id}")
     
-    def get_vocab_size(self) -> int:
+    @classmethod
+    def get_vocab_size(cls) -> int:
         """
         Get the vocabulary size.
         """
-        return self.vocab_size 
+        return cls.vocab_size 
 
-
-# Define a list of cuisines for the restaurant model
-CUISINES = [
-    "japanese", "chinese", "indian", "american", "italian", 
-    "french", "mexican"
-]
-
-class RestaurantCFG(BaseModel):
-    """
-    A CFG model for restaurant data.
-    The model can be either a restaurant with a cuisine or a not_restaurant.
-    """
-    type: Literal["restaurant", "not_restaurant"]
-    cuisine: Optional[str] = None
-    
-    def to_string(self) -> str:
-        """Convert the model to a string representation of the CFG."""
-        if self.type == "restaurant":
-            return f"{{restaurant({self.cuisine})}}"
-        else:
-            return "{not_restaurant}"
-    
-    @classmethod
-    def from_string(cls, text: str) -> "RestaurantCFG":
-        """Parse a string into a RestaurantCFG model."""
-        # Remove whitespace and braces
-        text = text.strip().replace(" ", "")
-        text = text.replace("{", "").replace("}", "")
-        
-        if text == "not_restaurant":
-            return cls(type="not_restaurant")
-        
-        # Parse restaurant(cuisine) format
-        match = re.match(r"restaurant\(([^)]+)\)", text)
-        if match:
-            cuisine = match.group(1)
-            return cls(type="restaurant", cuisine=cuisine)
-        
-        raise ValueError(f"Invalid CFG format: {text}")
-    
     @classmethod
     def get_possible_next_tokens(cls, partial_text: str) -> List[str]:
         """
@@ -275,71 +254,90 @@ class RestaurantCFG(BaseModel):
         return []
     
     @classmethod
-    def get_possible_next_tokens_indexes_mask(cls, list_of_tokens: List[int], tokenizer: CFGTokenizer) -> torch.Tensor:
+    def get_possible_next_tokens_indexes_mask(cls, list_of_tokens: List[int]) -> torch.Tensor:
         """
         Given a list of tokens, return the list of possible next tokens.
         """
         # list of tokens is (batch_size, block_size)
         last_token_id = list_of_tokens[-1]
 
-        mask = torch.zeros(1, len(tokenizer.vocab), dtype=torch.bool)
+        mask = torch.zeros(len(cls.vocab), dtype=torch.bool)
         
         # we re-write the logic
-        last_token = tokenizer.get_token(last_token_id)
+        last_token = cls.get_token(last_token_id)
         if last_token == "<BOS>":
-            mask[0, tokenizer.get_token_id("{")] = True
+            mask[cls.get_token_id("{")] = True
         elif last_token == "{":
-            mask[0, tokenizer.get_token_id("restaurant")] = True
-            mask[0, tokenizer.get_token_id("not_restaurant")] = True
+            mask[cls.get_token_id("restaurant")] = True
+            mask[cls.get_token_id("not_restaurant")] = True
         elif last_token == "restaurant":
-            mask[0, tokenizer.get_token_id("(")] = True
+            mask[cls.get_token_id("(")] = True
         elif last_token == "not_restaurant":
-            mask[0, tokenizer.get_token_id("}")] = True
+            mask[cls.get_token_id("}")] = True
         elif last_token == "(":
             for cuisine in CUISINES:
-                mask[0, tokenizer.get_token_id(cuisine)] = True
+                mask[cls.get_token_id(cuisine)] = True
         elif last_token == ")":
-            mask[0, tokenizer.get_token_id("}")] = True
+            mask[cls.get_token_id("}")] = True
         elif last_token == "}":
-            mask[0, tokenizer.get_token_id("<EOS>")] = True
+            mask[cls.get_token_id("<EOS>")] = True
         elif last_token == "<EOS>":
-            mask[0, tokenizer.get_token_id("<PAD>")] = True
+            mask[cls.get_token_id("<EOS>")] = True
         elif last_token in CUISINES:
-            mask[0, tokenizer.get_token_id(")")] = True
+            mask[cls.get_token_id(")")] = True
         else:
             raise ValueError(f"Unknown token: {last_token}")
         return mask
 
-def prepare_data():
+def prepare_data(outputs_only: bool = False):
     # 1. Load reviews.json
-    with open(os.path.join(output_dir, "all_reviews.json"), "r") as f:
+    with open(os.path.join(output_dir, "with_generations_2.json"), "r") as f:
         data = json.load(f)
 
     inputs = [item["input"] for item in data]
-    outputs = [item["output"] for item in data]
+    outputs = [item["expected"] for item in data]
+    generation_outputs = [item["generated"] for item in data]
 
-    # 2. Embed inputs
-    stella = stella_400m()  # Replace with your actual Stella model
-    input_embeddings = stella.embed(inputs)
+    if not outputs_only:
+        # 2. Embed inputs
+        time_start = time.time()
+        stella = stella_400m()  # Replace with your actual Stella model
+        input_embeddings = stella.embed(inputs)
+        time_end = time.time()
+        print(f"Time taken to embed inputs: {time_end - time_start} seconds")
 
     # 3. Tokenize and pad outputs
-    tokenizer = CFGTokenizer()
+    tokenizer = YelpEasyCFGTokenizer()
     output_tokens = []
-    for out in outputs:
-        tokens = tokenizer.tokenize(out)
+    generated_tokens_list = []
+    for i in range(len(outputs)):
+        tokens = tokenizer.tokenize(outputs[i])
         # Pad or truncate to block_size
         if len(tokens) < block_size:
             tokens += [tokenizer.pad_token_id] * (block_size - len(tokens))
         elif len(tokens) > block_size:
             raise ValueError(f"Output token length is greater than block size: {len(tokens)} > {block_size}")
+        
+        # get the generated tokens
+        generated_tokens = tokenizer.tokenize(generation_outputs[i])
+        # Pad or truncate to block_size
+        if len(generated_tokens) < block_size:
+            generated_tokens += [tokenizer.pad_token_id] * (block_size - len(generated_tokens))
+        elif len(generated_tokens) > block_size:
+            raise ValueError(f"Generated token length is greater than block size: {len(generated_tokens)} > {block_size}")
 
         output_tokens.append(tokens)
+        generated_tokens_list.append(generated_tokens)
     output_tokens = np.array(output_tokens, dtype=np.int16)  # shape: (num_samples, block_size)
+    generated_tokens_list = np.array(generated_tokens_list, dtype=np.int16)  # shape: (num_samples, block_size)
 
+    # check that all the lists are the same length
+    assert len(input_embeddings) == len(output_tokens) == len(generated_tokens_list)
     # 4. Save to files
-    np.save(os.path.join(output_dir, "input_embeddings.npy"), input_embeddings)
-    np.save(os.path.join(output_dir, "output_tokens.npy"), output_tokens)
-
+    if not outputs_only:
+        np.save(os.path.join(output_dir, "input_embeddings_2.npy"), input_embeddings)
+    np.save(os.path.join(output_dir, "output_tokens_2.npy"), output_tokens)
+    np.save(os.path.join(output_dir, "generated_tokens_list_2.npy"), generated_tokens_list)
     # Save tokenizer metadata for reference
     with open(os.path.join(output_dir, "tokenizer_meta.pkl"), "wb") as f:
         pickle.dump({
@@ -351,51 +349,62 @@ def prepare_data():
     print(f"Saved {len(inputs)} samples to {output_dir}")
 
 in_memory_input_embeddings = None
-in_memory_output_tokens = None
+in_memory_ground_truth_tokens = None
+in_memory_generated_tokens_list = None
+rng = np.random.default_rng(2)
 
 # 5. get_batch function for training
-def get_batch_yahoo(batch_size, split="train", seed=None, device=None, limit_to_num_samples=None):
+def get_batch_yahoo(batch_size: int,  train_samples_limit, split: str = "train", device: Optional[torch.device] = None):
     """
     Returns:
         x_embed: (batch_size, embedding_dim) - input embeddings
         x_tokens: (batch_size, block_size-1) - input tokens for next-token prediction
         y_tokens: (batch_size, block_size-1) - target tokens for next-token prediction
     """
-    # For demonstration, use all data for both train/val
-    # make this global so that we don't need to load the data again
-    global in_memory_input_embeddings, in_memory_output_tokens
-
+    global in_memory_input_embeddings, in_memory_ground_truth_tokens, in_memory_generated_tokens_list
 
     if in_memory_input_embeddings is None:
-        in_memory_input_embeddings = np.load(os.path.join(output_dir, "input_embeddings.npy"))
-    if in_memory_output_tokens is None:
-        in_memory_output_tokens = np.load(os.path.join(output_dir, "output_tokens.npy"))
-
+        in_memory_input_embeddings = np.load(os.path.join(output_dir, "input_embeddings_2.npy"))
+        print(f"Loaded input embeddings for {in_memory_input_embeddings.shape[0]} samples")
+    if in_memory_ground_truth_tokens is None:
+        in_memory_ground_truth_tokens = np.load(os.path.join(output_dir, "output_tokens_2.npy")) 
+        print(f"Loaded output tokens for {in_memory_ground_truth_tokens.shape[0]} samples")
+    if in_memory_generated_tokens_list is None:
+        in_memory_generated_tokens_list = np.load(os.path.join(output_dir, "generated_tokens_list_2.npy"))
+        print(f"Loaded generated tokens list for {in_memory_generated_tokens_list.shape[0]} samples")
+    
     num_samples = in_memory_input_embeddings.shape[0]
 
-
-    rng = np.random.default_rng(seed)
+    assert not (train_samples_limit is None and split == "train")
+    # batch size is only valid for training split (batches are done outside of this for val)
+    assert (batch_size is not None and split == "train") or (batch_size is None and split != "train")
 
     if split == "train":
-        # go from 0 to 90% of the data  
         low = 0
-        high = int(num_samples * 0.9)
-        if limit_to_num_samples is not None:
-            high = min(high, limit_to_num_samples)
-        
-    elif split == "val":
-        # go from 90% to 100% of the data
-        low = int(num_samples * 0.9)
+        high = train_samples_limit
+    elif split == "val" or split == "test":
+        low = train_samples_limit
         high = num_samples
     else:
         raise ValueError(f"Invalid split: {split}")
-
-    idx = rng.choice(high - low, size=batch_size, replace=False)
-    idx += low
-
+    
+    possible_choice_num = high - low
+    if batch_size is not None and batch_size > possible_choice_num:
+        raise ValueError(f"Possible choice number is smaller than batch size: {possible_choice_num} < {batch_size}")
+    
+    if split == "train":
+        idx = rng.choice(possible_choice_num, size=batch_size, replace=False)
+        idx += low
+    else:   
+        idx = np.arange(low, high)
 
     x_embed = in_memory_input_embeddings[idx]  # (batch_size, embedding_dim)
-    tokens = in_memory_output_tokens[idx]      # (batch_size, block_size)
+    if split == "train":
+        tokens = in_memory_generated_tokens_list[idx]      # (batch_size, block_size)
+    elif split == "val":
+        tokens = in_memory_generated_tokens_list[idx]      # (batch_size, block_size)
+    elif split == "test":
+        tokens = in_memory_ground_truth_tokens[idx]      # (batch_size, block_size)
 
     # convert all to torch tensors 
     x_embed = torch.from_numpy(x_embed)
@@ -407,30 +416,45 @@ def get_batch_yahoo(batch_size, split="train", seed=None, device=None, limit_to_
     x_tokens = tokens
     y_tokens = tokens[:, 1:]
     # pad with <PAD> (-1) to the right
-    y_tokens = torch.cat([y_tokens, -1 * torch.ones(batch_size, 1, dtype=torch.int64)], dim=1)
+
+    y_tokens_size = y_tokens.shape[0]
+    y_tokens = torch.cat([y_tokens, -1 * torch.ones(y_tokens_size, 1, dtype=torch.int64)], dim=1)
 
     # put on device
-    x_embed = x_embed.to(device)
-    x_tokens = x_tokens.to(device)
-    y_tokens = y_tokens.to(device)
-
+    # x_embed = x_embed.to(device)
+    # x_tokens = x_tokens.to(device)
+    # y_tokens = y_tokens.to(device)
 
     return x_embed, x_tokens, y_tokens
 
 # Example usage
 if __name__ == "__main__":
     # prepare_data()
-    x_embed, x_tokens, y_tokens = get_batch_yahoo(batch_size=64, split="val")
-    tokenizer = CFGTokenizer()
-    print("x_embed shape:", x_embed.shape)
-    print("x_tokens shape:", x_tokens.shape)
-    print("y_tokens shape:", y_tokens.shape)
-    print("x_tokens[0]:", x_tokens[0])
-    print("y_tokens[0]:", y_tokens[0])
-    print("x_tokens[0]:", tokenizer.detokenize(x_tokens[0].tolist()))
-    print("y_tokens[0]:", tokenizer.detokenize(y_tokens[0].tolist()))
+    # x_embed, x_tokens, y_tokens = get_batch_yahoo(batch_size=64, split="val")
+    # tokenizer = YelpEasyCFGTokenizer()
+    # print("x_embed shape:", x_embed.shape)
+    # print("x_tokens shape:", x_tokens.shape)
+    # print("y_tokens shape:", y_tokens.shape)
+    # print("x_tokens[0]:", x_tokens[0])
+    # print("y_tokens[0]:", y_tokens[0])
+    # print("x_tokens[0]:", tokenizer.detokenize(x_tokens[0].tolist()))
+    # print("y_tokens[0]:", tokenizer.detokenize(y_tokens[0].tolist()))
 
-    print("x_tokens[1]:", x_tokens[1])
-    print("y_tokens[1]:", y_tokens[1])
-    print("x_tokens[1]:", tokenizer.detokenize(x_tokens[1].tolist()))
-    print("y_tokens[1]:", tokenizer.detokenize(y_tokens[1].tolist()))
+    # print("x_tokens[1]:", x_tokens[1])
+    # print("y_tokens[1]:", y_tokens[1])
+    # print("x_tokens[1]:", tokenizer.detokenize(x_tokens[1].tolist()))
+    # print("y_tokens[1]:", tokenizer.detokenize(y_tokens[1].tolist()))
+
+    # print(get_chatgpt_completions())
+    prepare_data()
+
+    # data = json.load(open(os.path.join(output_dir, "with_generations_2.json"), "r"))
+
+    # # count which have {restaurant(None)
+
+    # count = 0
+    # for item in data:
+    #     if item["generated"] == "{restaurant(None)}":
+    #         count += 1
+    # print(f"Count: {count}")
+    # print("--------------------------------")

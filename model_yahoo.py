@@ -290,47 +290,76 @@ class GPT(nn.Module):
     @torch.no_grad()
     def generate_cfg(self, context_embeddings, max_new_tokens, tokenizer, temperature=1.0, top_k=None):
         """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+        Generate tokens for a batch using grammar constraints and stop when all sequences reach <EOS>.
+        
+        Args:
+            context_embeddings: Tensor of shape (b, embedding_dim)
+            max_new_tokens: int, maximum number of tokens to generate
+            tokenizer: tokenizer object with get_token_id() and get_possible_next_tokens_indexes_mask()
+            temperature: float
+            top_k: int or None
+        Returns:
+            idx: LongTensor of shape (b, t)
         """
-        # this is for a single batch of size 1
-        # context_embeddings is a tensor of shape (1, size_of_context_embedding)
-        # we start with a sequence of length 1 with the first token being the <BOS> token that gets 
-        # replaced by the context embedding
-        idx = torch.zeros((1, 1), dtype=torch.long, device=context_embeddings.device)
-        idx[0, 0] = tokenizer.get_token_id("<BOS>")
+        batch_size = context_embeddings.size(0)
+        device = context_embeddings.device
+
+        # Start with <BOS> token for each sequence in the batch
+        bos_token_id = tokenizer.get_token_id("<BOS>")
+        eos_token_id = tokenizer.get_token_id("<EOS>")
+        idx = torch.full((batch_size, 1), bos_token_id, dtype=torch.long, device=device)
+
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
         for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
-            # forward the model to get the logits for the index in the sequence
+            # Forward through the model
             logits, _ = self(idx, context_embeddings)
+            # print(f"logits shape: {logits.shape}")
 
-            # get the mask of the possible next tokens
-            list_of_tokens = idx.flatten().tolist()
-            mask = tokenizer.get_possible_next_tokens_indexes_mask(list_of_tokens)
-            mask = mask.to(logits.device)
+            # Get logits for the last token position
+            logits = logits[:, -1, :] / temperature  # (b, vocab_size)
+            # print(f"logits shape after temperature: {logits.shape}")
 
-            # we need to mask the logits where the mask is False
-            logits = logits.masked_fill(~mask, -float('Inf'))
+            # Constraint masking: get mask for each sequence separately
+            masks = []
+            for i in range(batch_size):
+                tokens_so_far = idx[i].tolist()
+                mask = tokenizer.get_possible_next_tokens_indexes_mask(tokens_so_far)
+                masks.append(mask.to(device))
 
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
-            # optionally crop the logits to only the top k options
-            # if top_k is not None:
-            #     v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-            #     logits[logits < v[:, [-1]]] = -float('Inf')
-            # apply softmax to convert logits to (normalized) probabilities
+            # print(f"masks shape: {masks[0].shape}")
+
+            # Stack masks into a single tensor (b, vocab_size)
+            constraint_mask = torch.stack(masks, dim=0)
+
+            # print(f"constraint_mask shape: {constraint_mask.shape}")
+            logits = logits.masked_fill(~constraint_mask, -float('Inf'))
+
+            # print(f"logits shape after masking: {logits.shape}")
+
+            # Apply softmax
             probs = F.softmax(logits, dim=-1)
-            # sample from the distribution
-            # idx_next = torch.multinomial(probs, num_samples=1)
-            # pick the most likely token
-            idx_next = torch.argmax(probs, dim=-1)
-            # reshape to (1, 1)
-            idx_next = idx_next.reshape(1, 1)
-            # append sampled index to the running sequence and continue
-            idx = torch.cat((idx, idx_next), dim=1)
 
-            if idx_next == tokenizer.get_token_id("<EOS>"):
+            # print(f"probs shape: {probs.shape}")
+
+            # Greedy decoding
+            idx_next = torch.argmax(probs, dim=-1, keepdim=True)  # (b, 1)
+
+            # print(f"idx_next shape: {idx_next.shape}")
+
+            # Update finished flags
+            newly_finished = idx_next.squeeze(1) == eos_token_id
+
+            # print(f"newly_finished shape: {newly_finished.shape}")
+            # print(f"finished shape: {finished.shape}")
+            finished = finished | newly_finished
+
+            # Stop early if all sequences are finished
+            if finished.all():
+                idx = torch.cat((idx, idx_next), dim=1)
                 break
+
+            # Append the new token to the sequence
+            idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
