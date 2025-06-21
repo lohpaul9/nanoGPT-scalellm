@@ -343,7 +343,11 @@ class GPT(nn.Module):
             # print(f"probs shape: {probs.shape}")
 
             # Greedy decoding
-            idx_next = torch.argmax(probs, dim=-1, keepdim=True)  # (b, 1)
+            # idx_next = torch.argmax(probs, dim=-1, keepdim=True)  # (b, 1)
+
+            # sample decoding
+            idx_next = torch.multinomial(probs, num_samples=1)  # (b, 1)
+
 
             # print(f"idx_next shape: {idx_next.shape}")
 

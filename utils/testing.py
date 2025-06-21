@@ -106,16 +106,25 @@ def batch_process_with_retries(
 
     return updated_rows, time_taken
 
-prompt_prefix_easy_classifier = """Classify the following business reviews as a restaurant with its cuisine or not a restaurant. Example:
-    Input: Barrigas Mexican Restaurant - This is our 4th time here and everything we order is so good. Today we ordered the Pastor con Quezo and the red snapper. 
-    Output: restaurant(mexican)
+prompt_prefix_easy_classifier = """Classify the following business reviews as a restaurant with its cuisine or not a restaurant in the specific format provided below. 
+The possible cuisines are: {american, chinese, french, indian, italian, japanese, mexican}. If it is not a restaurant, just output {not_restaurant}.
+If it is a restaurant, output the cuisine in the format {restaurant(cuisine)}.
 
-    Input: Pasadena Car Wash & Auto Detailing - Terrible job, didn't even open the rear doors to vacuum. 
-    Output: not_restaurant
+Do NOT include any explanation or elaboration, just output the answer in the exact format provided. 
 
-    Input: The Black Bull Kitchen & Bar - The best Pizza & Burgers ever! All of the food here is top notch! Offering free delivery at this time and you can also order on Uber Eats or Door Dash!
-    Output: restaurant(american)
-    """
+Example:
+Input: Barrigas Mexican Restaurant - This is our 4th time here and everything we order is so good. Today we ordered the Pastor con Quezo and the red snapper. 
+Assistant:{restaurant(mexican)}
+
+Input: Pasadena Car Wash & Auto Detailing - Terrible job, didn't even open the rear doors to vacuum. 
+Assistant:{not_restaurant}
+
+Input: The Black Bull Kitchen & Bar - The best Pizza & Burgers ever! All of the food here is top notch! Offering free delivery at this time and you can also order on Uber Eats or Door Dash!
+Assistant:{restaurant(american)}
+
+--------------------------------
+Actual Review:
+Input:"""
 
 class CuisineEnum(str, Enum):
     japanese = "japanese"
@@ -190,7 +199,7 @@ class MultiClassNonFoodRelatedTagsEnum(str, Enum):
 """
 E.g. 
 NON_FOOD_TAGS{Active Life,Arts & Entertainment,Event Planning & Services}
-FOOD_TAGS{RESTAURANT(Mexican),Fast Food}NON_FOOD_TAGS{Event Planning & Services}
+FOOD_TAGS{RESTAURANT(),Fast Food}NON_FOOD_TAGS{Event Planning & Services}
 FOOD_TAGS{Bars}NON_FOOD_TAGS{Nightlife}
 """
 
@@ -218,26 +227,31 @@ class TagClassifierModel(BaseModel):
             str_rep += "}"
         return str_rep
     
-prompt_prefix_multi_tags = """Add the correct tags to the following review. Each tag should only be added once. Be precise. There are 3 tag categories to choose from:
-1. Cuisine: The cuisine of the restaurant if it is a restaurant.
-2. FoodRelatedTags: The food related tags of the review if it is a food related tag.
-3. NonFoodRelatedTags: The non food related tags of the review if it is a non food related tag.
-
-Example:
+prompt_prefix_multi_tags = """
 Input: The Mystery Mansion - We did the serial killer escape room. My friends really enjoyed it; however, my flashlight was flickering.
-Output: Cuisine: American, FOOD_TAGS: [Escape Room], NON_FOOD_TAGS: [Event Planning & Services]
+Output:NON_FOOD_TAGS{Escape Room,Event Planning & Services}
 
-Input: QDOBA Mexican Eats - Ordered 2 order 3 cheese nachos and both of us were disappointed because it was like dipping the chips in soup. They do deliver though.
-Output: Cuisine: Mexican, FOOD_TAGS: [Fast Food], NON_FOOD_TAGS: [Event Planning & Services]
+Input: QDOBA Mexican Eats - Ordered 2 order 3 cheese nachos and both of us were disappointed because it was like dipping the chips in soup. They do deliver though...
+Output:FOOD_TAGS{RESTAURANT(Mexican),Fast Food}NON_FOOD_TAGS{Event Planning & Services}
 
 Input: The best Pizza & Burgers ever! All of the food here is top notch! Offering free delivery at this time and you can also order on Uber Eats or Door Dash!
-Output: FOOD_TAGS: [Bars], NON_FOOD_TAGS: [Nightlife]
+Output:FOOD_TAGS{Bars}NON_FOOD_TAGS{Nightlife}
 
-Input: Sacred Paradise Spa - Don't go to this site it's all about just getting your money and you do not get any service from them | I recently experienced two massage treatments at Sacred Paradise Spa. I went there based upon a word of mouth referral. 
-Output: NON_FOOD_TAGS: [Active Life, Beauty & Spas, Fitness & Instruction, Health & Medical]
+Input: Sacred Paradise Spa - Don't go to this site it's all about just getting your money and you do not get any service from them | I recently experienced two massage treatments at Sacred Paradise Spa. I went there based upon a word of mouth referral...
+Output:NON_FOOD_TAGS{Active Life,Beauty & Spas,Fitness & Instruction,Health & Medical}
 
-Actual Review:\n
-"""
+--------------------------------
+Above were some examples of how to add tags to restaurants. Add the correct tags to the review following this. Each tag should only be added once. Be precise. There are 3 possible tag categories to add under:
+1. FOOD_TAGS: The food related tags of the review if it is a food related tag. The possible food related tags are: {Bars,Sandwiches,Pizza,Coffee & Tea,Fast Food,Burgers,Breakfast & Brunch,Specialty Food,Seafood,Desserts,Bakeries,Salad,Chicken Wings}
+2. Cuisine: The cuisine of the restaurant if it is a restaurant. The possible cuisines are: {Mexican,Italian,Chinese,American}
+3. NON_FOOD_TAGS: The non food related tags of the review if it is a non food related tag. The possible non food related tags are: {Home Services,Automotive,Beauty & Spas,Nightlife,Health & Medical,Event Planning & Services,Active Life,Hotels & Travel,Home & Garden,Fashion,Arts & Entertainment,Hair Salons,Nail Salons,Doctors,Pets,Real Estate,Fitness & Instruction}
+
+The format should be exactly the same as the examples below. Note that FoodRelatedTags comes first, then nested within it is Cuisine, and then after that comes NON_FOOD_TAGS. 
+Do NOT include any other text or characters in your output. Output the tags in alphabetical order. Every review has at least one tag.
+
+Add the tags to the review below.
+--------------------------------
+Input:"""
 
 def get_instructions_and_expected(file_path, prompt_prefix, eval_size=1):
     with open(file_path, "r") as f:
@@ -395,13 +409,16 @@ def get_gpt_completions_multitags():
         print(f"Recall: {f1_metrics[2]}")
 
 
-def get_hf_prompt_completion_dataset(max_train_samples, path_to_json_file, task, is_training=True):
+def get_hf_prompt_completion_dataset(max_train_samples, path_to_json_file, task, is_training=True, use_llama=False, is_for_smollm2=False):
     if task == "multi_tags":
         prompt_prefix = prompt_prefix_multi_tags
     elif task == "easy":
         prompt_prefix = prompt_prefix_easy_classifier
     else:
         raise ValueError(f"Task {task} not supported")
+
+
+    print(f"is_for_smollm2: {is_for_smollm2}")
 
     # Path to your JSON file
     data = json.load(open(path_to_json_file, "r"))
@@ -410,15 +427,23 @@ def get_hf_prompt_completion_dataset(max_train_samples, path_to_json_file, task,
     else:
         data = data[max_train_samples:]
 
-    
+    generation_key = "generated_llama" if use_llama else "generated"
 
     # Optional: Format it into a prompt-completion format
     def format_prompt_completion(example):
-        return {
-            "prompt": prompt_prefix + example["input"],
-            "completion": example["generated"],  # or use "expected" if preferred,
-            "expected": example["expected"]
-        }
+
+        if is_for_smollm2:
+            return {
+                "prompt": prompt_prefix + example["input"],
+                "completion": "Output:" + example[generation_key],  # or use "expected" if preferred,
+                "expected": example["expected"]
+            }
+        else:
+            return {
+                "prompt": prompt_prefix + example["input"],
+                "completion": example[generation_key],  # or use "expected" if preferred,
+                "expected": example["expected"]
+            }
 
     # Apply formatting
     formatted_data = [format_prompt_completion(entry) for entry in data]
@@ -430,7 +455,7 @@ def get_hf_prompt_completion_dataset(max_train_samples, path_to_json_file, task,
 
 
 def get_hf_prompt_only_dataset_from_full_prompt_completion_dataset(dataset : Dataset):
-    return dataset.map(lambda x: x["prompt"])
+    return dataset.map(lambda x: {"text": x["prompt"]})
 
 
 if __name__ == "__main__":

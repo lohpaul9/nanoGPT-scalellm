@@ -56,7 +56,8 @@ def train_yahoo_small(
         experiment_type,
         learning_rate = 6e-4,
         wandb_log = False,
-        only_eval_at_end = True,    
+        only_eval_at_end = True,
+        use_llama = False    
 ):
     # name = 'yahoo_small'
     out_dir = 'out/' + experiment_name + '_' + str(time.time())
@@ -241,9 +242,9 @@ def train_yahoo_small(
                 print(f"Evaluating {split} {k}/{eval_iters}")
 
                 if split == 'train':
-                    X_EMBED, X_TOKENS, Y_TOKENS = get_batch_fn(train_batch_size, split=split, device=device, train_samples_limit=max_train_samples)
+                    X_EMBED, X_TOKENS, Y_TOKENS = get_batch_fn(train_batch_size, split=split, device=device, train_samples_limit=max_train_samples, use_llama=use_llama)
                 else:
-                    X_EMBED, X_TOKENS, Y_TOKENS = get_batch_fn(None, split=split, device=device, train_samples_limit=max_train_samples)
+                    X_EMBED, X_TOKENS, Y_TOKENS = get_batch_fn(None, split=split, device=device, train_samples_limit=max_train_samples, use_llama=use_llama)
                 with ctx:
                     if split == 'train':
                         X_TOKENS = X_TOKENS.to(device)
@@ -261,6 +262,8 @@ def train_yahoo_small(
                         true_positives = 0
                         false_positives = 0
                         false_negatives = 0
+
+                        total_undecipherable = 0
 
                         # iterate over the max_val_samples in batches of size batch_size
                         for i in range(0, num_eval_samples, val_batch_size):
@@ -280,8 +283,20 @@ def train_yahoo_small(
                             cfg_token_list = cfg_tokens.tolist()
                             y_token_list = Y_CURR_TOKENS.tolist()
 
-                            cfg_strings = [tokenizer.detokenize(cfg_token) for cfg_token in cfg_token_list]
-                            target_strings = [tokenizer.detokenize(y_token) for y_token in y_token_list]
+                            cfg_strings = []
+                            target_strings = []
+
+                            for i in range(len(cfg_token_list)):
+                                try:
+                                    cfg_strings.append(tokenizer.detokenize(cfg_token_list[i]))
+                                    target_strings.append(tokenizer.detokenize(y_token_list[i]))
+                                except:
+                                    print(f"Error detokenizing token {tokenizer.detokenize(cfg_token_list[i], require_eos=False)}")
+                                    # print(f"Error detokenizing token {tokenizer.detokenize(y_token_list[i], require_eos=False)}")
+                                    total_undecipherable += 1
+
+                            # cfg_strings = [tokenizer.detokenize(cfg_token) for cfg_token in cfg_token_list]
+                            # target_strings = [tokenizer.detokenize(y_token) for y_token in y_token_list]
 
                             # pprint(list(zip(cfg_strings, target_strings)))
 
@@ -306,6 +321,7 @@ def train_yahoo_small(
                             out[f"{split}_precision"] = true_positives / (true_positives + false_positives)
                             out[f"{split}_recall"] = true_positives / (true_positives + false_negatives)
                             out[f"{split}_f1"] = 2 * (out[f"{split}_precision"] * out[f"{split}_recall"]) / (out[f"{split}_precision"] + out[f"{split}_recall"])
+                            out[f"{split}_undecipherable"] = total_undecipherable / total_samples
                         out[f"{split}_time"] = total_time
 
                 losses[k] = loss.item()
@@ -334,7 +350,7 @@ def train_yahoo_small(
         wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
     # training loop
-    X_EMBED, X_TOKENS, Y_TOKENS = get_batch_fn(train_batch_size, split="train", device=device, train_samples_limit=max_train_samples) # fetch the very first batch
+    X_EMBED, X_TOKENS, Y_TOKENS = get_batch_fn(train_batch_size, split="train", device=device, train_samples_limit=max_train_samples, use_llama=use_llama) # fetch the very first batch
     X_EMBED = X_EMBED.to(device)
     X_TOKENS = X_TOKENS.to(device)
     Y_TOKENS = Y_TOKENS.to(device)
@@ -395,7 +411,7 @@ def train_yahoo_small(
                 logits, loss = model(X_TOKENS, X_EMBED, Y_TOKENS)
                 loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
-            X_EMBED, X_TOKENS, Y_TOKENS = get_batch_fn(train_batch_size, split="train", device=device, train_samples_limit=max_train_samples)
+            X_EMBED, X_TOKENS, Y_TOKENS = get_batch_fn(train_batch_size, split="train", device=device, train_samples_limit=max_train_samples, use_llama=use_llama)
             X_EMBED = X_EMBED.to(device)
             X_TOKENS = X_TOKENS.to(device)
             Y_TOKENS = Y_TOKENS.to(device)
@@ -558,16 +574,17 @@ def best_experiment_for_multi_tags():
         n_layer=1,
         n_head=4,
         n_embd=512,
-        dropout=0.0,
-        max_iters=500,
-        max_train_samples=4096,
-        train_batch_size=4096,
+        dropout=0.1,
+        max_iters=2000,
+        max_train_samples=1024,
+        train_batch_size=1024,
         # max_val_samples=65536,
         val_batch_size=8192,
         eval_iters=1,
         experiment_type="multi_tags",
         wandb_log=False,
         only_eval_at_end=True,
+        use_llama=False
     )
 
 
@@ -578,7 +595,7 @@ def best_experiment_for_easy_classification():
         n_layer=1,
         n_head=1,
         n_embd=128,
-        dropout=0.0,
+        dropout=0.1,
         max_iters=500,
         max_train_samples=1024,
         train_batch_size=1024,
